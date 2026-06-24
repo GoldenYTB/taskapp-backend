@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import pool from "./db.js";
+import pool from "./db-pg.js";
 
 dotenv.config();
 
@@ -11,10 +11,28 @@ app.use(express.json());
 
 const USER_RATE = parseFloat(process.env.USER_REWARD_RATE || "0.30");
 const REF_RATE = parseFloat(process.env.REFERRAL_RATE || "0.05");
-const MIN_WD = parseFloat(process.env.MIN_WITHDRAWAL_USD || "0.10");
+const MIN_WD = parseFloat(process.env.MIN_WITHDRAWAL_USD || "3.00");
 const SECRET = process.env.OFFERWALL_SECRET || "change_me";
+const BOT_TOKEN = process.env.BOT_TOKEN || ""; // needed for channel-join verification
 const ADSGRAM_REWARD_USD = parseFloat(process.env.ADSGRAM_REWARD_USD || "0.001");
 const ALLOWED_COINS = ["USDT"];
+
+// new monetization config
+const ADS_PER_DAY = parseInt(process.env.ADS_PER_DAY || "20");        // cap of rewarded ads/day
+const REF_SIGNUP_BONUS = parseFloat(process.env.REF_SIGNUP_BONUS || "0.001"); // one-time per referral
+const STREAK_BONUS = parseFloat(process.env.STREAK_BONUS || "0.0005");        // daily check-in reward
+
+function sameDay(d) {
+  if (!d) return false;
+  const a = new Date(d), n = new Date();
+  return a.getUTCFullYear() === n.getUTCFullYear() && a.getUTCMonth() === n.getUTCMonth() && a.getUTCDate() === n.getUTCDate();
+}
+function yesterday(d) {
+  if (!d) return false;
+  const a = new Date(d), n = new Date();
+  const diff = Math.floor((Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()) - Date.UTC(a.getUTCFullYear(), a.getUTCMonth(), a.getUTCDate())) / 86400000);
+  return diff === 1;
+}
 
 // ─── register / load a user ──────────────────────────────────────────────────
 app.post("/api/user", async (req, res) => {
@@ -22,11 +40,25 @@ app.post("/api/user", async (req, res) => {
   if (!telegram_id) return res.status(400).json({ error: "telegram_id required" });
 
   let r = await pool.query("SELECT * FROM users WHERE telegram_id = $1", [telegram_id]);
+  let isNew = false;
   if (r.rows.length === 0) {
+    // don't let a user refer themselves
+    const ref = referred_by && String(referred_by) !== String(telegram_id) ? referred_by : null;
     await pool.query(
       "INSERT INTO users (telegram_id, username, referred_by) VALUES ($1, $2, $3)",
-      [telegram_id, username || null, referred_by || null]
+      [telegram_id, username || null, ref]
     );
+    isNew = true;
+    // credit the referrer: +count and a small one-time bonus
+    if (ref) {
+      const exists = await pool.query("SELECT 1 FROM users WHERE telegram_id = $1", [ref]);
+      if (exists.rows.length) {
+        await pool.query(
+          "UPDATE users SET ref_count = ref_count + 1, balance_usd = balance_usd + $1, total_earned = total_earned + $1 WHERE telegram_id = $2",
+          [REF_SIGNUP_BONUS, ref]
+        );
+      }
+    }
     r = await pool.query("SELECT * FROM users WHERE telegram_id = $1", [telegram_id]);
   }
   const u = r.rows[0];
@@ -35,6 +67,11 @@ app.post("/api/user", async (req, res) => {
     balance_usd: u.balance_usd,
     total_earned: u.total_earned,
     min_withdrawal: MIN_WD,
+    ref_count: u.ref_count,
+    streak_days: u.streak_days,
+    ads_today: sameDay(u.ads_date) ? u.ads_today : 0,
+    ads_max: ADS_PER_DAY,
+    is_new: isNew,
   });
 });
 
@@ -44,6 +81,18 @@ app.get("/postback/adsgram", async (req, res) => {
   const { userid, key } = req.query;
   if (!userid) return res.status(400).send("missing userid");
   if (key !== SECRET) return res.status(403).send("bad key");
+
+  // enforce daily ad cap
+  const ur = await pool.query("SELECT ads_today, ads_date FROM users WHERE telegram_id = $1", [userid]);
+  if (ur.rows.length) {
+    const row = ur.rows[0];
+    const todayCount = sameDay(row.ads_date) ? row.ads_today : 0;
+    if (todayCount >= ADS_PER_DAY) return res.status(200).send("daily cap reached");
+    await pool.query(
+      "UPDATE users SET ads_today = $1, ads_date = CURRENT_DATE WHERE telegram_id = $2",
+      [todayCount + 1, userid]
+    );
+  }
 
   const gross = ADSGRAM_REWARD_USD;
   const userReward = +(gross * USER_RATE).toFixed(6);
@@ -75,6 +124,54 @@ app.get("/postback/adsgram", async (req, res) => {
   res.status(200).send("ok");
 });
 
+// ─── daily check-in (streak) ─────────────────────────────────────────────────
+app.post("/api/checkin", async (req, res) => {
+  const { telegram_id } = req.body;
+  const r = await pool.query("SELECT * FROM users WHERE telegram_id = $1", [telegram_id]);
+  if (r.rows.length === 0) return res.status(404).json({ error: "user not found" });
+  const u = r.rows[0];
+
+  if (sameDay(u.last_checkin)) {
+    return res.json({ already: true, streak_days: u.streak_days, message: "Already checked in today" });
+  }
+  const newStreak = yesterday(u.last_checkin) ? u.streak_days + 1 : 1;
+  // streak multiplier: longer streak = bigger bonus, capped at 7x
+  const mult = Math.min(newStreak, 7);
+  const reward = +(STREAK_BONUS * mult).toFixed(6);
+
+  await pool.query(
+    "UPDATE users SET streak_days = $1, last_checkin = CURRENT_DATE, balance_usd = balance_usd + $2, total_earned = total_earned + $2 WHERE telegram_id = $3",
+    [newStreak, reward, telegram_id]
+  );
+  res.json({ streak_days: newStreak, reward, message: `Day ${newStreak} streak! +$${reward}` });
+});
+
+// ─── offerwall postback (surveys/installs pay more per action) ────────────────
+// Provider posts: https://YOUR-BACKEND/postback/offer?userid=X&txn=Y&payout=Z&key=SECRET
+app.get("/postback/offer", async (req, res) => {
+  const { userid, txn, payout, key } = req.query;
+  if (key !== SECRET) return res.status(403).send("bad key");
+  if (!userid || !txn || !payout) return res.status(400).send("missing params");
+  const gross = parseFloat(payout);
+  if (!(gross > 0)) return res.status(400).send("bad payout");
+
+  const userReward = +(gross * USER_RATE).toFixed(6);
+  try {
+    await pool.query(
+      `INSERT INTO completions (telegram_id, network, network_txn, gross_usd, user_reward)
+       VALUES ($1, 'offerwall', $2, $3, $4)`,
+      [userid, txn, gross, userReward]
+    );
+  } catch (e) {
+    return res.status(200).send("duplicate ignored");
+  }
+  await pool.query(
+    "UPDATE users SET balance_usd = balance_usd + $1, total_earned = total_earned + $1 WHERE telegram_id = $2",
+    [userReward, userid]
+  );
+  res.status(200).send("ok");
+});
+
 // ─── transaction history ─────────────────────────────────────────────────────
 app.get("/api/transactions", async (req, res) => {
   const { telegram_id } = req.query;
@@ -92,6 +189,82 @@ app.get("/api/transactions", async (req, res) => {
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
     .slice(0, 50);
   res.json(all);
+});
+
+// ─── TASKS: list active tasks for a user (with completion status) ────────────
+app.get("/api/tasks", async (req, res) => {
+  const { telegram_id } = req.query;
+  const tasks = await pool.query("SELECT id, title, type, target, reward FROM tasks WHERE active = true ORDER BY id DESC");
+  const done = await pool.query("SELECT task_id FROM task_completions WHERE telegram_id = $1", [telegram_id]);
+  const doneSet = new Set(done.rows.map(r => r.task_id));
+  res.json(tasks.rows.map(t => ({ ...t, completed: doneSet.has(t.id) })));
+});
+
+// ─── TASKS: claim a task reward ──────────────────────────────────────────────
+// For 'channel' tasks we verify membership via the bot. For 'link' tasks it's tap-to-complete.
+app.post("/api/tasks/claim", async (req, res) => {
+  const { telegram_id, task_id } = req.body;
+  const tr = await pool.query("SELECT * FROM tasks WHERE id = $1 AND active = true", [task_id]);
+  if (tr.rows.length === 0) return res.status(404).json({ error: "Task not found" });
+  const task = tr.rows[0];
+
+  // already claimed?
+  const dup = await pool.query("SELECT 1 FROM task_completions WHERE task_id = $1 AND telegram_id = $2", [task_id, telegram_id]);
+  if (dup.rows.length) return res.status(400).json({ error: "Already completed" });
+
+  // verify channel membership via Telegram bot API
+  if (task.type === "channel") {
+    if (!BOT_TOKEN) return res.status(500).json({ error: "Channel check unavailable" });
+    try {
+      const chat = task.target.startsWith("@") ? task.target : "@" + task.target;
+      const tgRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(chat)}&user_id=${telegram_id}`);
+      const data = await tgRes.json();
+      const status = data?.result?.status;
+      const isMember = ["member", "administrator", "creator"].includes(status);
+      if (!isMember) return res.status(400).json({ error: "Join the channel first, then tap claim" });
+    } catch (e) {
+      return res.status(500).json({ error: "Could not verify membership" });
+    }
+  }
+
+  // credit the reward
+  try {
+    await pool.query("INSERT INTO task_completions (task_id, telegram_id) VALUES ($1, $2)", [task_id, telegram_id]);
+  } catch (e) {
+    return res.status(400).json({ error: "Already completed" });
+  }
+  await pool.query(
+    "UPDATE users SET balance_usd = balance_usd + $1, total_earned = total_earned + $1 WHERE telegram_id = $2",
+    [task.reward, telegram_id]
+  );
+  res.json({ ok: true, reward: task.reward, message: `+$${task.reward} earned!` });
+});
+
+// ─── ADMIN: add a task ───────────────────────────────────────────────────────
+app.post("/admin/tasks", async (req, res) => {
+  if (req.query.key !== SECRET) return res.status(403).send("forbidden");
+  const { title, type, target, reward } = req.body;
+  if (!title || !target || !reward) return res.status(400).json({ error: "title, target, reward required" });
+  const t = (type === "channel") ? "channel" : "link";
+  const r = await pool.query(
+    "INSERT INTO tasks (title, type, target, reward) VALUES ($1, $2, $3, $4) RETURNING id",
+    [title, t, target, parseFloat(reward)]
+  );
+  res.json({ ok: true, id: r.rows[0].id });
+});
+
+// ─── ADMIN: list all tasks ───────────────────────────────────────────────────
+app.get("/admin/tasks", async (req, res) => {
+  if (req.query.key !== SECRET) return res.status(403).send("forbidden");
+  const r = await pool.query("SELECT * FROM tasks ORDER BY id DESC");
+  res.json(r.rows);
+});
+
+// ─── ADMIN: remove (deactivate) a task ───────────────────────────────────────
+app.post("/admin/tasks/:id/remove", async (req, res) => {
+  if (req.query.key !== SECRET) return res.status(403).send("forbidden");
+  await pool.query("UPDATE tasks SET active = false WHERE id = $1", [req.params.id]);
+  res.json({ ok: true });
 });
 
 // ─── request a withdrawal (manual approval) ──────────────────────────────────
