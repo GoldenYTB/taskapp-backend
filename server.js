@@ -136,6 +136,23 @@ app.get("/postback/adsgram", (req, res) => {
 // --- request a withdrawal (MANUAL approval) ---
 const ALLOWED_COINS = ["USDT"]; // USDT on the TON blockchain only
 
+// ─── TRANSACTION HISTORY (rewards + withdrawals) ─────────────────────────────
+app.get("/api/transactions", (req, res) => {
+  const { telegram_id } = req.query;
+  if (!telegram_id) return res.status(400).json({ error: "telegram_id required" });
+
+  const rewards = db.prepare(
+    "SELECT 'reward' as type, user_reward as amount, network as detail, created_at FROM completions WHERE telegram_id = ? ORDER BY id DESC LIMIT 50"
+  ).all(telegram_id);
+
+  const withdrawals = db.prepare(
+    "SELECT 'withdrawal' as type, amount_usd as amount, status as detail, created_at FROM withdrawals WHERE telegram_id = ? ORDER BY id DESC LIMIT 50"
+  ).all(telegram_id);
+
+  const all = [...rewards, ...withdrawals].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  res.json(all.slice(0, 50));
+});
+
 app.post("/api/withdraw", (req, res) => {
   const { telegram_id, address, currency } = req.body;
   const coin = (currency || "").toUpperCase();
