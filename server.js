@@ -41,53 +41,6 @@ app.post("/api/user", (req, res) => {
 });
 
 // --- offerwall postback (the network calls this when a task completes) ---
-// Configure each network's postback URL as:
-//   https://your-backend/postback/<network>?user_id={uid}&txn={txn}&payout={usd}&sig={hash}
-app.get("/postback/:network", (req, res) => {
-  const { network } = req.params;
-  const { user_id, txn, payout, sig } = req.query;
-
-  if (!user_id || !txn || !payout) return res.status(400).send("missing params");
-
-  // verify signature so nobody can forge completions
-  const expected = crypto
-    .createHash("sha256")
-    .update(`${user_id}:${txn}:${payout}:${SECRET}`)
-    .digest("hex");
-  if (sig !== expected) return res.status(403).send("bad signature");
-
-  const gross = parseFloat(payout);
-  if (!(gross > 0)) return res.status(400).send("bad payout");
-
-  const userReward = +(gross * USER_RATE).toFixed(4); // user gets 30%, you keep 70%
-
-  try {
-    const insert = db.prepare(
-      `INSERT INTO completions (telegram_id, network, network_txn, gross_usd, user_reward)
-       VALUES (?, ?, ?, ?, ?)`
-    );
-    insert.run(user_id, network, txn, gross, userReward);
-  } catch (e) {
-    // UNIQUE(network, txn) violation = replay, ignore safely
-    return res.status(200).send("duplicate ignored");
-  }
-
-  db.prepare(
-    "UPDATE users SET balance_usd = balance_usd + ?, total_earned = total_earned + ? WHERE telegram_id = ?"
-  ).run(userReward, userReward, user_id);
-
-  // optional referral bonus, paid from YOUR cut (not the user's)
-  const u = db.prepare("SELECT referred_by FROM users WHERE telegram_id = ?").get(user_id);
-  if (u && u.referred_by) {
-    const refBonus = +(gross * REF_RATE).toFixed(4);
-    db.prepare(
-      "UPDATE users SET balance_usd = balance_usd + ?, total_earned = total_earned + ? WHERE telegram_id = ?"
-    ).run(refBonus, refBonus, u.referred_by);
-  }
-
-  res.status(200).send("ok");
-});
-
 // --- Adsgram reward postback ---
 // Adsgram replaces [userId] with the user's Telegram ID and sends a GET to this URL
 // when a rewarded ad is fully watched. Adsgram does NOT send a signature, so we protect
