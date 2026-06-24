@@ -17,6 +17,11 @@ async function init() {
       balance_usd   DOUBLE PRECISION NOT NULL DEFAULT 0,
       total_earned  DOUBLE PRECISION NOT NULL DEFAULT 0,
       referred_by   BIGINT,
+      ref_count     INTEGER NOT NULL DEFAULT 0,
+      streak_days   INTEGER NOT NULL DEFAULT 0,
+      last_checkin  DATE,
+      ads_today     INTEGER NOT NULL DEFAULT 0,
+      ads_date      DATE,
       created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
@@ -40,7 +45,38 @@ async function init() {
       status        TEXT NOT NULL DEFAULT 'pending',
       created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id            SERIAL PRIMARY KEY,
+      title         TEXT NOT NULL,
+      type          TEXT NOT NULL DEFAULT 'link',   -- channel | link
+      target        TEXT NOT NULL,                  -- channel @username, or URL
+      reward        DOUBLE PRECISION NOT NULL,
+      active        BOOLEAN NOT NULL DEFAULT true,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS task_completions (
+      id            SERIAL PRIMARY KEY,
+      task_id       INTEGER NOT NULL,
+      telegram_id   BIGINT NOT NULL,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(task_id, telegram_id)
+    );
   `);
+
+  // migrations for existing databases (safe to run repeatedly)
+  const cols = [
+    "ref_count INTEGER NOT NULL DEFAULT 0",
+    "streak_days INTEGER NOT NULL DEFAULT 0",
+    "last_checkin DATE",
+    "ads_today INTEGER NOT NULL DEFAULT 0",
+    "ads_date DATE",
+  ];
+  for (const c of cols) {
+    const name = c.split(" ")[0];
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ${c}`).catch(() => {});
+  }
   console.log("Postgres tables ready");
 }
 
