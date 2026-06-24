@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import pool from "./db-pg.js";
+import pool from "./db.js";
 
 dotenv.config();
 
