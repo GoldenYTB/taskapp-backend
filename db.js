@@ -52,6 +52,7 @@ async function init() {
       type          TEXT NOT NULL DEFAULT 'link',   -- channel | link
       target        TEXT NOT NULL,                  -- channel @username, or URL
       reward        DOUBLE PRECISION NOT NULL,
+      image_url     TEXT,
       active        BOOLEAN NOT NULL DEFAULT true,
       created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     );
@@ -77,6 +78,8 @@ async function init() {
     const name = c.split(" ")[0];
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ${c}`).catch(() => {});
   }
+  // tasks image column for existing DBs
+  await pool.query("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS image_url TEXT").catch(() => {});
   console.log("Postgres tables ready");
 }
 
