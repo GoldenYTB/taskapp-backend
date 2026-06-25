@@ -214,14 +214,31 @@ app.post("/api/tasks/claim", async (req, res) => {
 
   // verify channel membership via Telegram bot API
   if (task.type === "channel") {
-    if (!BOT_TOKEN) return res.status(500).json({ error: "Channel check unavailable" });
+    if (!BOT_TOKEN) return res.status(500).json({ error: "Channel check unavailable (BOT_TOKEN not set)" });
     try {
-      const chat = task.target.startsWith("@") ? task.target : "@" + task.target;
+      // normalize target: strip URL parts, ensure leading @
+      let chat = task.target.trim()
+        .replace(/^https?:\/\/t\.me\//i, "")
+        .replace(/^t\.me\//i, "")
+        .replace(/^@/, "");
+      chat = "@" + chat;
+
       const tgRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(chat)}&user_id=${telegram_id}`);
       const data = await tgRes.json();
+
+      // Telegram returned an error (usually: bot not admin, or wrong channel)
+      if (!data.ok) {
+        const desc = (data.description || "").toLowerCase();
+        if (desc.includes("chat not found"))
+          return res.status(400).json({ error: "Channel not found — check the @username" });
+        if (desc.includes("member list is inaccessible") || desc.includes("not enough rights") || desc.includes("administrator"))
+          return res.status(400).json({ error: "Bot must be an admin of the channel" });
+        return res.status(400).json({ error: "Channel check failed: " + (data.description || "unknown") });
+      }
+
       const status = data?.result?.status;
       const isMember = ["member", "administrator", "creator"].includes(status);
-      if (!isMember) return res.status(400).json({ error: "Join the channel first, then tap claim" });
+      if (!isMember) return res.status(400).json({ error: "Join the channel first, then tap again" });
     } catch (e) {
       return res.status(500).json({ error: "Could not verify membership" });
     }
@@ -265,6 +282,22 @@ app.post("/admin/tasks/:id/remove", async (req, res) => {
   if (req.query.key !== SECRET) return res.status(403).send("forbidden");
   await pool.query("UPDATE tasks SET active = false WHERE id = $1", [req.params.id]);
   res.json({ ok: true });
+});
+
+// ─── ADMIN: manually credit (or deduct) a user's balance ─────────────────────
+app.post("/admin/credit", async (req, res) => {
+  if (req.query.key !== SECRET) return res.status(403).send("forbidden");
+  const { telegram_id, amount } = req.body;
+  const amt = parseFloat(amount);
+  if (!telegram_id || isNaN(amt)) return res.status(400).json({ error: "telegram_id and amount required" });
+  const u = await pool.query("SELECT * FROM users WHERE telegram_id = $1", [telegram_id]);
+  if (u.rows.length === 0) return res.status(404).json({ error: "User not found" });
+  await pool.query(
+    "UPDATE users SET balance_usd = balance_usd + $1, total_earned = total_earned + GREATEST($1,0) WHERE telegram_id = $2",
+    [amt, telegram_id]
+  );
+  const updated = await pool.query("SELECT balance_usd FROM users WHERE telegram_id = $1", [telegram_id]);
+  res.json({ ok: true, new_balance: updated.rows[0].balance_usd });
 });
 
 // ─── request a withdrawal (manual approval) ──────────────────────────────────
