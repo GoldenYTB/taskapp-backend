@@ -194,7 +194,7 @@ app.get("/api/transactions", async (req, res) => {
 // ─── TASKS: list active tasks for a user (with completion status) ────────────
 app.get("/api/tasks", async (req, res) => {
   const { telegram_id } = req.query;
-  const tasks = await pool.query("SELECT id, title, type, target, reward FROM tasks WHERE active = true ORDER BY id DESC");
+  const tasks = await pool.query("SELECT id, title, type, target, reward, image_url FROM tasks WHERE active = true ORDER BY id DESC");
   const done = await pool.query("SELECT task_id FROM task_completions WHERE telegram_id = $1", [telegram_id]);
   const doneSet = new Set(done.rows.map(r => r.task_id));
   res.json(tasks.rows.map(t => ({ ...t, completed: doneSet.has(t.id) })));
@@ -243,12 +243,12 @@ app.post("/api/tasks/claim", async (req, res) => {
 // ─── ADMIN: add a task ───────────────────────────────────────────────────────
 app.post("/admin/tasks", async (req, res) => {
   if (req.query.key !== SECRET) return res.status(403).send("forbidden");
-  const { title, type, target, reward } = req.body;
+  const { title, type, target, reward, image_url } = req.body;
   if (!title || !target || !reward) return res.status(400).json({ error: "title, target, reward required" });
   const t = (type === "channel") ? "channel" : "link";
   const r = await pool.query(
-    "INSERT INTO tasks (title, type, target, reward) VALUES ($1, $2, $3, $4) RETURNING id",
-    [title, t, target, parseFloat(reward)]
+    "INSERT INTO tasks (title, type, target, reward, image_url) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    [title, t, target, parseFloat(reward), image_url || null]
   );
   res.json({ ok: true, id: r.rows[0].id });
 });
