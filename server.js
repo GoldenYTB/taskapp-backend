@@ -15,7 +15,7 @@ const MIN_WD = parseFloat(process.env.MIN_WITHDRAWAL_USD || "3.00");
 const SECRET = process.env.OFFERWALL_SECRET || "change_me";
 const BOT_TOKEN = process.env.BOT_TOKEN || ""; // needed for channel-join verification
 const ADSGRAM_REWARD_USD = parseFloat(process.env.ADSGRAM_REWARD_USD || "0.001");
-const ALLOWED_COINS = ["USDT"];
+const ALLOWED_COINS = ["USDT", "LTC"];
 
 // new monetization config
 const ADS_PER_DAY = parseInt(process.env.ADS_PER_DAY || "20");        // cap of rewarded ads/day
@@ -81,6 +81,10 @@ app.get("/postback/adsgram", async (req, res) => {
   const { userid, key } = req.query;
   if (!userid) return res.status(400).send("missing userid");
   if (key !== SECRET) return res.status(403).send("bad key");
+
+  // frozen/banned users earn nothing
+  const ban = await pool.query("SELECT banned FROM users WHERE telegram_id = $1", [userid]);
+  if (ban.rows[0] && ban.rows[0].banned) return res.status(200).send("account frozen");
 
   // enforce daily ad cap
   const ur = await pool.query("SELECT ads_today, ads_date FROM users WHERE telegram_id = $1", [userid]);
@@ -307,8 +311,9 @@ app.post("/api/withdraw", async (req, res) => {
   const r = await pool.query("SELECT * FROM users WHERE telegram_id = $1", [telegram_id]);
   if (r.rows.length === 0) return res.status(404).json({ error: "user not found" });
   const u = r.rows[0];
+  if (u.banned) return res.status(403).json({ error: "Account frozen. Contact support." });
   if (!address) return res.status(400).json({ error: "address required" });
-  if (!ALLOWED_COINS.includes(coin)) return res.status(400).json({ error: "Choose USDT" });
+  if (!ALLOWED_COINS.includes(coin)) return res.status(400).json({ error: "Choose USDT or LTC" });
   if (u.balance_usd < MIN_WD) return res.status(400).json({ error: `Minimum withdrawal is $${MIN_WD}` });
 
   const amount = u.balance_usd;
