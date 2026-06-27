@@ -333,9 +333,34 @@ app.get("/admin/withdrawals", async (req, res) => {
 });
 
 // ─── admin: mark a withdrawal paid/rejected ──────────────────────────────────
+// ─── post a payout proof to the proof channel ───────────────────────────────
+const PROOF_CHANNEL = process.env.PROOF_CHANNEL || ""; // e.g. @CrypticPayouts or -100123...
+async function postProof({ amount, currency, txId, note }) {
+  if (!BOT_TOKEN || !PROOF_CHANNEL) return { ok: false, reason: "channel not configured" };
+  const lines = [
+    "✅ *Payout Sent!*",
+    "",
+    `💰 Amount: *$${Number(amount).toFixed(2)} ${currency || "USDT"}*`,
+  ];
+  if (txId) lines.push(`🔗 Transaction: \`${txId}\``);
+  if (note) lines.push(`📝 ${note}`);
+  lines.push("", "Earn yours on TaskIt 👉 @TaskIt_officialbot");
+  const text = lines.join("\n");
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: PROOF_CHANNEL, text, parse_mode: "Markdown", disable_web_page_preview: true }),
+    });
+    const d = await r.json();
+    return { ok: d.ok, reason: d.description };
+  } catch (e) {
+    return { ok: false, reason: String(e) };
+  }
+}
+
 app.post("/admin/withdrawals/:id", async (req, res) => {
   if (req.query.key !== SECRET) return res.status(403).send("forbidden");
-  const { status } = req.body;
+  const { status, tx_id, post_proof } = req.body;
   const r = await pool.query("SELECT * FROM withdrawals WHERE id = $1", [req.params.id]);
   if (r.rows.length === 0) return res.status(404).send("not found");
   const w = r.rows[0];
@@ -343,6 +368,22 @@ app.post("/admin/withdrawals/:id", async (req, res) => {
     await pool.query("UPDATE users SET balance_usd = balance_usd + $1 WHERE telegram_id = $2", [w.amount_usd, w.telegram_id]);
   }
   await pool.query("UPDATE withdrawals SET status = $1 WHERE id = $2", [status, req.params.id]);
+
+  // auto-post proof when marked paid (unless caller opts out)
+  let proof = null;
+  if (status === "paid" && post_proof !== false) {
+    proof = await postProof({ amount: w.amount_usd, currency: w.currency, txId: tx_id });
+  }
+  res.json({ ok: true, proof });
+});
+
+// ─── manual proof post (paste your own details + tx id) ──────────────────────
+app.post("/admin/proof", async (req, res) => {
+  if (req.query.key !== SECRET) return res.status(403).send("forbidden");
+  const { amount, currency, tx_id, note } = req.body;
+  if (!amount) return res.status(400).json({ error: "amount required" });
+  const result = await postProof({ amount, currency, txId: tx_id, note });
+  if (!result.ok) return res.status(500).json({ error: result.reason || "post failed" });
   res.json({ ok: true });
 });
 
