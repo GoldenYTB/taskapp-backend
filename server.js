@@ -11,7 +11,7 @@ app.use(express.json());
 
 const USER_RATE = parseFloat(process.env.USER_REWARD_RATE || "0.30");
 const REF_RATE = parseFloat(process.env.REFERRAL_RATE || "0.05");
-const MIN_WD = parseFloat(process.env.MIN_WITHDRAWAL_USD || "3.00");
+const MIN_WD = parseFloat(process.env.MIN_WITHDRAWAL_USD || "5.00");
 const SECRET = process.env.OFFERWALL_SECRET || "change_me";
 const BOT_TOKEN = process.env.BOT_TOKEN || ""; // needed for channel-join verification
 const ADSGRAM_REWARD_USD = parseFloat(process.env.ADSGRAM_REWARD_USD || "0.001");
